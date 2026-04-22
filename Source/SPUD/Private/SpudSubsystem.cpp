@@ -8,14 +8,10 @@
 #include "TimerManager.h"
 #include "HAL/FileManager.h"
 #include "Async/Async.h"
-#include "Engine/TextureRenderTarget2D.h"
 #include "Kismet/KismetRenderingLibrary.h"
 
-#ifdef USE_SAVEGAMESYSTEM
 #include "SaveGameSystem.h"
-//needed
 #include "PlatformFeatures.h"
-#endif
 
 DEFINE_LOG_CATEGORY(LogSpudSubsystem)
 
@@ -433,8 +429,6 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 	if (ScreenshotData)
 		State->SetScreenshot(*ScreenshotData);
 
-#ifdef USE_SAVEGAMESYSTEM
-	// VIVI: Consoles require using the SaveGameSystem
 	if (ISaveGameSystem* SaveSystem = IPlatformFeaturesModule::Get().GetSaveGameSystem())
 	{
 		TSharedRef<TArray<uint8>> OutSaveData(new TArray<uint8>());
@@ -503,41 +497,6 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 	{
 		SaveComplete(SlotName, UserIndex, false);
 	}
-#else
-	// UGameplayStatics::SaveGameToSlot prefixes our save with a lot of crap that we don't need
-	// And also wraps it with FObjectAndNameAsStringProxyArchive, which again we don't need
-	// Plus it writes it all to memory first, which we don't need another copy of. Write direct to file
-	// I'm not sure if the save game system doesn't do this because of some console hardware issues, but
-	// I'll worry about that at some later point
-	IFileManager& FileMgr = IFileManager::Get();
-	auto Archive = TUniquePtr<FArchive>(FileMgr.CreateFileWriter(*GetSaveGameFilePath(SlotName)));
-
-	bool SaveOK;
-	if(Archive)
-	{
-		State->SaveToArchive(*Archive);
-		// Always explicitly close to catch errors from flush/close
-		Archive->Close();
-
-		if (Archive->IsError() || Archive->IsCriticalError())
-		{
-			UE_LOG(LogSpudSubsystem, Error, TEXT("Error while saving game to %s"), *SlotName);
-			SaveOK = false;
-		}
-		else
-		{
-			UE_LOG(LogSpudSubsystem, Log, TEXT("Save to slot %s: Success"), *SlotName);
-			SaveOK = true;
-		}
-	}
-	else
-	{
-		UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
-		SaveOK = false;
-	}
-
-	SaveComplete(SlotName, UserIndex, SaveOK);
-#endif
 }
 
 void USpudSubsystem::SaveComplete(const FString& SlotName, const int32 UserIndex, bool bSuccess)
@@ -1586,7 +1545,9 @@ void USpudSubsystem::Tick(float DeltaTime)
 		}
 	}
 	for (const int32 Idx : TimedOut)
+	{
 		ScreenshotTimedOut(Idx);
+	}
 
 	if (bSupportWorldPartition)
 	{

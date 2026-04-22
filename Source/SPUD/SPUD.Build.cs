@@ -8,23 +8,7 @@ public class SPUD : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
-		const bool ForceUseSaveGameSystem = false;
-
-		// We have to use the SaveGameSystem if the Target Platform
-		// isn't a known platform with an unrestricted filesystem
-		if (
-			!(
-			    (Target.Platform == UnrealTargetPlatform.Win64) ||
-			    (Target.Platform == UnrealTargetPlatform.Mac) ||
-			    (Target.Platform == UnrealTargetPlatform.Linux) ||
-			    (Target.Platform == UnrealTargetPlatform.LinuxArm64) 
-		    ) || ForceUseSaveGameSystem
-		)
-		{
-			PrivateDefinitions.Add("USE_SAVEGAMESYSTEM=1");
-		}
-
-        PublicIncludePaths.AddRange(
+		PublicIncludePaths.AddRange(
             new string[] {
             }
             );
