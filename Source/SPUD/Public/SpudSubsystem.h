@@ -15,9 +15,9 @@ class USpudRuntimeStoredActorComponent;
 DECLARE_LOG_CATEGORY_EXTERN(LogSpudSubsystem, Verbose, Verbose);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpudPreLoadGame, const FString&, SlotName);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FSpudPostLoadGame, const FString&, SlotName, const int32, UserIndex, bool, bSuccess);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FSpudPostLoadGame, const FString&, SlotName, bool, bSuccess);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpudPreSaveGame, const FString&, SlotName);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FSpudPostSaveGame, const FString&, SlotName, const int32, UserIndex, bool, bSuccess);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FSpudPostSaveGame, const FString&, SlotName, bool, bSuccess);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpudPreLevelStore, const FString&, LevelName);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FSpudOnLevelStore, const FString&, LevelName);
@@ -329,7 +329,7 @@ public:
 	* @param ExtraInfo Optional object containing custom fields you want to be available when listing saves
 	**/
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void AutoSaveGame(FText Title = FText(), const int32 UserIndex = 0, bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr);
+    void AutoSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0);
 	/** Perform a Quick Save of the game in a single re-used slot, in response to a player request
 	 * @param Title Optional title of the save, if blank will be titled "Quick Save"
 	 * @param bTakeScreenshot If true, the save will include a screenshot, the dimensions of which are
@@ -337,21 +337,21 @@ public:
 	 * @param ExtraInfo Optional object containing custom fields you want to be available when listing saves
 	 **/
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void QuickSaveGame(FText Title = FText(), const int32 UserIndex = 0, bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr);
+    void QuickSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0);
 	
 	/**
 	 * Quick load the game from the last player-requested Quick Save slot (NOT the last autosave or manual save)
 	 * @param TravelOptions Options string to include in the travel URL e.g. "Listen"
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void QuickLoadGame(const int32 UserIndex = 0, const FString& TravelOptions = FString(TEXT("")));
+    void QuickLoadGame(const FString& TravelOptions = FString(TEXT("")), const int32 UserIndex = 0);
 	
 	/**
 	 * Continue a game from the latest save of any kind - autosave, quick save, manual save. The same as calling LoadGame on the most recent. 
 	 * @param TravelOptions Options string to include in the travel URL e.g. "Listen"
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void LoadLatestSaveGame(const int32 UserIndex = 0, const FString& TravelOptions = FString(TEXT("")));
+    void LoadLatestSaveGame(const FString& TravelOptions = FString(TEXT("")), const int32 UserIndex = 0);
 
 	/// Create a save game descriptor which you can use to store additional descriptive information about a save game.
 	/// Fill the returned object in then pass it to the SaveGame call to have additional info to display on save/load screens
@@ -368,7 +368,7 @@ public:
 	 * @param ExtraInfo Optional object containing custom fields you want to be available when listing saves
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void SaveGame(const FString& SlotName, const int32 UserIndex, const FText& Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, bool async = false);
+    void SaveGame(const FString& SlotName, const FText& Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0, bool bAsync = false);
 
 	/**
 	 * Load the game in a given slot name. Asynchronous, use the PostLoadGame event to determine when load is complete (and success)
@@ -376,11 +376,11 @@ public:
 	 * @param TravelOptions Options string to include in the travel URL e.g. "Listen"
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void LoadGame(const FString& SlotName, const int32 UserIndex, const FString& TravelOptions = FString(TEXT("")));
+    void LoadGame(const FString& SlotName, const FString& TravelOptions = FString(TEXT("")), const int32 UserIndex = 0);
 
 	/// Delete the save game in a given slot
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    bool DeleteSave(const FString& SlotName, const int32 UserIndex);
+    bool DeleteSave(const FString& SlotName, const int32 UserIndex = 0);
 
 	/**
 	* Add a global object to the list of objects which will have their state saved / loaded
@@ -516,7 +516,7 @@ public:
 	 * @param LatentInfo Completion callback
 	 */
 	UFUNCTION(BlueprintCallable, meta=(Latent, LatentInfo = "LatentInfo"), Category="SPUD")
-	void UpgradeAllSaveGames(bool bUpgradeEvenIfNoUserDataModelVersionDifferences, FSpudUpgradeSaveDelegate SaveNeedsUpgradingCallback, FLatentActionInfo LatentInfo, const int32 UserIndex);
+	void UpgradeAllSaveGames(bool bUpgradeEvenIfNoUserDataModelVersionDifferences, FSpudUpgradeSaveDelegate SaveNeedsUpgradingCallback, FLatentActionInfo LatentInfo, const int32 UserIndex = 0);
 	
 	/// Return whether a named slot is a quick save
 	/// Useful for when parsing through saves to check if something is a manual save or not
@@ -563,7 +563,7 @@ public:
 	static FString GetSaveGameDirectory();
 	static FString GetSaveGameFilePath(const FString& SlotName);
 	// Lists saves: note that this is only the filenames, not the directory
-	static void ListSaveGameFiles(TArray<FString>& OutSaveFileList, const int32 UserIndex);
+	static void ListSaveGameFiles(TArray<FString>& OutSaveFileList, const int32 UserIndex = 0);
 	static FString GetActiveGameFolder();
 	static FString GetActiveGameFilePath(const FString& Name);
 

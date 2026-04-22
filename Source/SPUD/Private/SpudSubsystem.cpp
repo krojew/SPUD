@@ -29,6 +29,7 @@ void USpudSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	bIsTearingDown = false;
 	// Note: this will register for clients too, but callbacks will be ignored
 	// We can't call ServerCheck() here because GameMode won't be valid (which is what we use to determine server mode)
+	// UserIndex 0: single-player assumption; multi-user map loads would need a stored LoadingUserIndex member
 	OnPostLoadMapHandle = FCoreUObjectDelegates::PostLoadMapWithWorld.AddUObject(this, &USpudSubsystem::OnPostLoadMap, 0);
 	OnPreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddUObject(this, &USpudSubsystem::OnPreLoadMap);
 	
@@ -129,27 +130,27 @@ void USpudSubsystem::EndGame()
 	IsRestoringState = false;
 }
 
-void USpudSubsystem::AutoSaveGame(FText Title, const int32 UserIndex, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo)
+void USpudSubsystem::AutoSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex)
 {
 	SaveGame(SPUD_AUTOSAVE_SLOTNAME,
-		UserIndex,
 		Title.IsEmpty() ? NSLOCTEXT("Spud", "AutoSaveTitle", "Autosave") : Title,
 		bTakeScreenshot,
-		ExtraInfo);
+		ExtraInfo,
+		UserIndex);
 }
 
-void USpudSubsystem::QuickSaveGame(FText Title, const int32 UserIndex, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo)
+void USpudSubsystem::QuickSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex)
 {
 	SaveGame(SPUD_QUICKSAVE_SLOTNAME,
-		UserIndex,
 		Title.IsEmpty() ? NSLOCTEXT("Spud", "QuickSaveTitle", "Quick Save") : Title,
 		bTakeScreenshot,
-		ExtraInfo);
+		ExtraInfo,
+		UserIndex);
 }
 
-void USpudSubsystem::QuickLoadGame(const int32 UserIndex, const FString& TravelOptions)
+void USpudSubsystem::QuickLoadGame(const FString& TravelOptions, const int32 UserIndex)
 {
-	LoadGame(SPUD_QUICKSAVE_SLOTNAME, UserIndex, TravelOptions);
+	LoadGame(SPUD_QUICKSAVE_SLOTNAME, TravelOptions, UserIndex);
 }
 
 
@@ -173,11 +174,11 @@ void USpudSubsystem::NotifyLevelUnloadedExternally(ULevel* Level)
 	HandleLevelUnloaded(Level);
 }
 
-void USpudSubsystem::LoadLatestSaveGame(const int32 UserIndex, const FString& TravelOptions)
+void USpudSubsystem::LoadLatestSaveGame(const FString& TravelOptions, const int32 UserIndex)
 {
 	auto Latest = GetLatestSaveGame();
 	if (Latest)
-		LoadGame(Latest->SlotName, UserIndex, TravelOptions);
+		LoadGame(Latest->SlotName, TravelOptions, UserIndex);
 }
 
 void USpudSubsystem::OnPreLoadMap(const FString& MapName)
@@ -287,7 +288,7 @@ void USpudSubsystem::OnPostLoadMap(UWorld* World, const int32 UserIndex)
 	PostTravelToNewMap.Broadcast();
 }
 
-void USpudSubsystem::SaveGame(const FString& SlotName, const int32 UserIndex, const FText& Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, bool async)
+void USpudSubsystem::SaveGame(const FString& SlotName, const FText& Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex, bool bAsync)
 {
 	if (!ServerCheck(true))
 	{
@@ -310,7 +311,7 @@ void USpudSubsystem::SaveGame(const FString& SlotName, const int32 UserIndex, co
 		return;
 	}
 
-	CurrentState = async ? ESpudSystemState::SavingGameAsync : ESpudSystemState::SavingGame;
+	CurrentState = bAsync ? ESpudSystemState::SavingGameAsync : ESpudSystemState::SavingGame;
 	PreSaveGame.Broadcast(SlotName);
 
 	if (bTakeScreenshot)
@@ -452,8 +453,9 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 			{
 				if (CurrentState == ESpudSystemState::SavingGameAsync)
 				{
+					TWeakObjectPtr<USpudSubsystem> WeakThis(this);
 					SaveSystem->SaveGameAsync(false, *SlotName, FPlatformMisc::GetPlatformUserForUserIndex(UserIndex), OutSaveData,
-						[&, UserIndex](const FString& SlotName, FPlatformUserId PlatformUserId, bool bSuccess)
+						[WeakThis, UserIndex, SlotName](const FString&, FPlatformUserId, bool bSuccess)
 						{
 							check(IsInGameThread());
 
@@ -466,7 +468,10 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 								UE_LOG(LogSpudSubsystem, Error, TEXT("Error while saving game to %s"), *SlotName);
 							}
 
-							SaveComplete(SlotName, UserIndex, bSuccess);
+							if (USpudSubsystem* S = WeakThis.Get())
+							{
+								S->SaveComplete(SlotName, UserIndex, bSuccess);
+							}
 						});
 				}
 				else
@@ -538,7 +543,7 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 void USpudSubsystem::SaveComplete(const FString& SlotName, const int32 UserIndex, bool bSuccess)
 {
 	CurrentState = ESpudSystemState::RunningIdle;
-	PostSaveGame.Broadcast(SlotName, UserIndex, bSuccess);
+	PostSaveGame.Broadcast(SlotName, bSuccess);
 	// It's possible that the reference to SlotName *is* SlotNameInProgress, so we can't reset it until after
 	SlotNameInProgress = "";
 	TitleInProgress = FText();
@@ -619,7 +624,7 @@ void USpudSubsystem::StoreLevel(ULevel* Level, bool bRelease, bool bBlocking)
 	PostLevelStore.Broadcast(LevelName, true);
 }
 
-void USpudSubsystem::LoadGame(const FString& SlotName, const int32 UserIndex, const FString& TravelOptions)
+void USpudSubsystem::LoadGame(const FString& SlotName, const FString& TravelOptions, const int32 UserIndex)
 {
 	if (!ServerCheck(true))
 	{
@@ -753,7 +758,7 @@ void USpudSubsystem::LoadComplete(const FString& SlotName, const int32 UserIndex
 {
 	CurrentState = ESpudSystemState::RunningIdle;
 	IsRestoringState = false;
-	PostLoadGame.Broadcast(SlotName, UserIndex, bSuccess);
+	PostLoadGame.Broadcast(SlotName, bSuccess);
 	// It's possible that the reference to SlotName *is* SlotNameInProgress, so we can't reset it until after
 	SlotNameInProgress = "";
 	
@@ -1567,6 +1572,7 @@ USpudCustomSaveInfo* USpudSubsystem::CreateCustomSaveInfo()
 
 void USpudSubsystem::Tick(float DeltaTime)
 {
+	TArray<int32> TimedOut;
 	for (TPair<int32, float>& ScreenShotTimeout : ScreenshotTimeouts)
 	{
 		if (ScreenShotTimeout.Value > 0)
@@ -1575,10 +1581,12 @@ void USpudSubsystem::Tick(float DeltaTime)
 			if (ScreenShotTimeout.Value <= 0)
 			{
 				ScreenShotTimeout.Value = 0;
-				ScreenshotTimedOut(ScreenShotTimeout.Key);
+				TimedOut.Add(ScreenShotTimeout.Key);
 			}
 		}
 	}
+	for (const int32 Idx : TimedOut)
+		ScreenshotTimedOut(Idx);
 
 	if (bSupportWorldPartition)
 	{
