@@ -126,22 +126,24 @@ void USpudSubsystem::EndGame()
 	IsRestoringState = false;
 }
 
-void USpudSubsystem::AutoSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex)
+void USpudSubsystem::AutoSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex, bool bAsync)
 {
 	SaveGame(SPUD_AUTOSAVE_SLOTNAME,
 		Title.IsEmpty() ? NSLOCTEXT("Spud", "AutoSaveTitle", "Autosave") : Title,
 		bTakeScreenshot,
 		ExtraInfo,
-		UserIndex);
+		UserIndex,
+		bAsync);
 }
 
-void USpudSubsystem::QuickSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex)
+void USpudSubsystem::QuickSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex, bool bAsync)
 {
 	SaveGame(SPUD_QUICKSAVE_SLOTNAME,
 		Title.IsEmpty() ? NSLOCTEXT("Spud", "QuickSaveTitle", "Quick Save") : Title,
 		bTakeScreenshot,
 		ExtraInfo,
-		UserIndex);
+		UserIndex,
+		bAsync);
 }
 
 void USpudSubsystem::QuickLoadGame(const FString& TravelOptions, const int32 UserIndex)

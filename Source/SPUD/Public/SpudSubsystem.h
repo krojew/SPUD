@@ -327,17 +327,21 @@ public:
 	* @param bTakeScreenshot If true, the save will include a screenshot, the dimensions of which are
 	* set by the ScreenshotWidth/ScreenshotHeight properties.
 	* @param ExtraInfo Optional object containing custom fields you want to be available when listing saves
+	* @param bAsync
 	**/
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void AutoSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0);
+    void AutoSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0, bool
+                      bAsync = false);
 	/** Perform a Quick Save of the game in a single re-used slot, in response to a player request
 	 * @param Title Optional title of the save, if blank will be titled "Quick Save"
 	 * @param bTakeScreenshot If true, the save will include a screenshot, the dimensions of which are
 	 * set by the ScreenshotWidth/ScreenshotHeight properties.
 	 * @param ExtraInfo Optional object containing custom fields you want to be available when listing saves
+	 * @param bAsync
 	 **/
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly)
-    void QuickSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0);
+    void QuickSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0, bool
+                       bAsync = false);
 	
 	/**
 	 * Quick load the game from the last player-requested Quick Save slot (NOT the last autosave or manual save)
