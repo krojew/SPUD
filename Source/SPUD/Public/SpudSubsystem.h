@@ -183,6 +183,9 @@ protected:
 	UPROPERTY()
 	TObjectPtr<const USpudCustomSaveInfo> ExtraInfoInProgress;
 
+	bool bPendingEndGame = false;
+	TOptional<TPair<bool, bool>> PendingNewGameArgs;
+
 	UPROPERTY()
 	TArray<TWeakObjectPtr<UObject>> GlobalObjects;
 	UPROPERTY()

@@ -81,6 +81,15 @@ void USpudSubsystem::NewGame(bool bCheckServerOnly, bool bAfterLevelLoad)
 	if (bCheckServerOnly && !ServerCheck(true))
 		return;
 		
+	if (IsSavingGame())
+	{
+		UE_LOG(LogSpudSubsystem, Log, TEXT("NewGame deferred until async save completes"));
+		bPendingEndGame = false;
+		PendingNewGameArgs.Emplace(bCheckServerOnly, bAfterLevelLoad);
+		return;
+	}
+	PendingNewGameArgs.Reset();
+
 	EndGame();
 	
 	// EndGame will have unsubscribed from all current levels
@@ -114,6 +123,15 @@ bool USpudSubsystem::ServerCheck(bool LogWarning) const
 
 void USpudSubsystem::EndGame()
 {
+	if (CurrentState == ESpudSystemState::SavingGameAsync)
+	{
+		UE_LOG(LogSpudSubsystem, Log, TEXT("EndGame deferred until async save completes"));
+		PendingNewGameArgs.Reset();
+		bPendingEndGame = true;
+		return;
+	}
+	bPendingEndGame = false;
+
 	if (ActiveState)
 		ActiveState->ResetState();
 	
@@ -410,12 +428,12 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 
 	State->StoreWorldGlobals(World);
 	
-	for (auto Ptr : GlobalObjects)
+	for (const auto& Ptr : GlobalObjects)
 	{
 		if (Ptr.IsValid())
 			State->StoreGlobalObject(Ptr.Get());
 	}
-	for (auto Pair : NamedGlobalObjects)
+	for (const auto& Pair : NamedGlobalObjects)
 	{
 		if (Pair.Value.IsValid())
 			State->StoreGlobalObject(Pair.Value.Get(), Pair.Key);
@@ -430,25 +448,65 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 	if (ScreenshotData)
 		State->SetScreenshot(*ScreenshotData);
 
-	if (ISaveGameSystem* SaveSystem = IPlatformFeaturesModule::Get().GetSaveGameSystem())
+	ISaveGameSystem* SaveSystem = IPlatformFeaturesModule::Get().GetSaveGameSystem();
+	if (!SaveSystem)
 	{
-		TSharedRef<TArray<uint8>> OutSaveData(new TArray<uint8>());
-		auto Archive = FMemoryWriter(*OutSaveData, true);
-		State->SaveToArchive(Archive);
-		Archive.Close();
+		SaveComplete(SlotName, UserIndex, false);
+		return;
+	}
 
+	if (CurrentState == ESpudSystemState::SavingGameAsync)
+	{
+		// StoreWorld has finished capturing all actor data into plain struct buffers.
+		// SaveToArchive only reads those buffers (no UObject derefs) so it can safely
+		// run on a background thread. EndGame() is guarded against SavingGameAsync,
+		// so ActiveState (UPROPERTY) remains alive for the duration of the task.
+		TWeakObjectPtr WeakState(State);
+		TWeakObjectPtr WeakThis(this);
+		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+			[WeakThis, WeakState, SaveSystem, SlotName, UserIndex]()
+			{
+				auto CompleteOnGameThread = [WeakThis, SlotName, UserIndex](bool bSuccess)
+				{
+					AsyncTask(ENamedThreads::GameThread, [WeakThis, SlotName, UserIndex, bSuccess]()
+	{
+						if (USpudSubsystem* S = WeakThis.Get())
+							S->SaveComplete(SlotName, UserIndex, bSuccess);
+					});
+				};
+
+				const auto RawState = WeakState.Get();
+				if (!RawState)
+				{
+					UE_LOG(LogSpudSubsystem, Error, TEXT("Save state was destroyed before async serialization could start for slot %s"), *SlotName);
+					CompleteOnGameThread(false);
+					return;
+				}
+
+				TSharedRef<TArray<uint8>> OutSaveData = MakeShared<TArray<uint8>>();
+				{
+					FMemoryWriter Archive(*OutSaveData, true);
+					RawState->SaveToArchive(Archive);
+		Archive.Close();
 		if (Archive.IsError() || Archive.IsCriticalError())
 		{
 			UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
-			SaveComplete(SlotName, UserIndex, false);
+						CompleteOnGameThread(false);
+						return;
+					}
 		}
-		else
+
+				if (OutSaveData->Num() == 0 || SlotName.IsEmpty())
 		{
-			if ((OutSaveData->Num() > 0) && (SlotName.Len() > 0))
-			{
-				if (CurrentState == ESpudSystemState::SavingGameAsync)
+					UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
+					CompleteOnGameThread(false);
+					return;
+				}
+
+				// Dispatch disk write from the game thread for platform safety - console
+				// save systems may not support calls from arbitrary background threads.
+				AsyncTask(ENamedThreads::GameThread, [WeakThis, SaveSystem, SlotName, UserIndex, OutSaveData]()
 				{
-					TWeakObjectPtr<USpudSubsystem> WeakThis(this);
 					SaveSystem->SaveGameAsync(false, *SlotName, FPlatformMisc::GetPlatformUserForUserIndex(UserIndex), OutSaveData,
 						[WeakThis, UserIndex, SlotName](const FString&, FPlatformUserId, bool bSuccess)
 						{
@@ -468,11 +526,24 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 								S->SaveComplete(SlotName, UserIndex, bSuccess);
 							}
 						});
+				});
+			});
 				}
 				else
 				{
-					bool SaveOK;
+		TSharedRef<TArray<uint8>> OutSaveData(new TArray<uint8>());
+		auto Archive = FMemoryWriter(*OutSaveData, true);
+		State->SaveToArchive(Archive);
+		Archive.Close();
 
+		if (Archive.IsError() || Archive.IsCriticalError())
+		{
+			UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
+			SaveComplete(SlotName, UserIndex, false);
+		}
+		else if (OutSaveData->Num() > 0 && SlotName.Len() > 0)
+		{
+					bool SaveOK;
 					if (!SaveSystem->SaveGame(false, *SlotName, UserIndex, *OutSaveData))
 					{
 						UE_LOG(LogSpudSubsystem, Error, TEXT("Error while saving game to %s"), *SlotName);
@@ -483,20 +554,13 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 						UE_LOG(LogSpudSubsystem, Log, TEXT("Save to slot %s: Success"), *SlotName);
 						SaveOK = true;
 					}
-
 					SaveComplete(SlotName, UserIndex, SaveOK);
 				}
-			}
 			else
 			{
 				UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
 				SaveComplete(SlotName, UserIndex, false);
 			}
-		}
-	}
-	else
-	{
-		SaveComplete(SlotName, UserIndex, false);
 	}
 }
 
@@ -508,6 +572,18 @@ void USpudSubsystem::SaveComplete(const FString& SlotName, const int32 UserIndex
 	SlotNameInProgress = "";
 	TitleInProgress = FText();
 	ExtraInfoInProgress = nullptr;
+
+	if (PendingNewGameArgs.IsSet())
+	{
+		const auto [bCheckServerOnly, bAfterLevelLoad] = PendingNewGameArgs.GetValue();
+		PendingNewGameArgs.Reset();
+		NewGame(bCheckServerOnly, bAfterLevelLoad);
+	}
+	else if (bPendingEndGame)
+	{
+		bPendingEndGame = false;
+		EndGame();
+	}
 }
 
 void USpudSubsystem::HandleLevelLoaded(FName LevelName)
@@ -520,7 +596,7 @@ void USpudSubsystem::HandleLevelLoaded(FName LevelName)
 	// that way the loading occurs in this thread, less latency
 	GetActiveState()->PreLoadLevelData(LevelName.ToString());
 
-	TWeakObjectPtr<USpudSubsystem> WeakThis(this);
+	TWeakObjectPtr WeakThis(this);
 	AsyncTask(ENamedThreads::GameThread, [WeakThis, LevelName]()
 	{
 		USpudSubsystem* Self = WeakThis.Get();
@@ -696,12 +772,12 @@ void USpudSubsystem::LoadGame(const FString& SlotName, const FString& TravelOpti
 	
 	// Just do the reverse of what we did
 	// Global objects first before map, these should be only objects which survive map load
-	for (auto Ptr : GlobalObjects)
+	for (const auto& Ptr : GlobalObjects)
 	{
 		if (Ptr.IsValid())
 			State->RestoreGlobalObject(Ptr.Get());
 	}
-	for (auto Pair : NamedGlobalObjects)
+	for (const auto& Pair : NamedGlobalObjects)
 	{
 		if (Pair.Value.IsValid())
 			State->RestoreGlobalObject(Pair.Value.Get(), Pair.Key);
@@ -747,7 +823,7 @@ bool USpudSubsystem::DeleteSave(const FString& SlotName, const int32 UserIndex)
 
 void USpudSubsystem::AddPersistentGlobalObject(UObject* Obj)
 {
-	GlobalObjects.AddUnique(TWeakObjectPtr<UObject>(Obj));	
+	GlobalObjects.AddUnique(TWeakObjectPtr(Obj));
 }
 
 void USpudSubsystem::AddPersistentGlobalObjectWithName(UObject* Obj, const FString& Name)
@@ -757,7 +833,7 @@ void USpudSubsystem::AddPersistentGlobalObjectWithName(UObject* Obj, const FStri
 
 void USpudSubsystem::RemovePersistentGlobalObject(UObject* Obj)
 {
-	GlobalObjects.Remove(TWeakObjectPtr<UObject>(Obj));
+	GlobalObjects.Remove(TWeakObjectPtr(Obj));
 	
 	for (auto It = NamedGlobalObjects.CreateIterator(); It; ++It)
 	{
@@ -997,6 +1073,8 @@ void USpudSubsystem::ForceReset()
 {
 	CurrentState = ESpudSystemState::RunningIdle;
 	IsRestoringState = false;
+	bPendingEndGame = false;
+	PendingNewGameArgs.Reset();
 }
 
 void USpudSubsystem::SetUserDataModelVersion(int32 Version)
@@ -1034,9 +1112,10 @@ bool USpudSubsystem::ShouldStoreLevel(const ULevel* Level)
 	if (!Level)
 		return false;
 	
-	for (auto Pattern : ExcludeLevelNamePatterns)
+	const auto LevelName = USpudState::GetLevelName(Level);
+	for (const auto& Pattern : ExcludeLevelNamePatterns)
 	{
-		if (USpudState::GetLevelName(Level).MatchesWildcard(Pattern))
+		if (LevelName.MatchesWildcard(Pattern))
 		{
 			return false;
 		}
@@ -1538,7 +1617,7 @@ void USpudSubsystem::Tick(float DeltaTime)
 		// only for authority.
 		if (world && world->GetAuthGameMode())
 		{
-			TSet<ULevelStreaming*> streamingLevels(world->GetStreamingLevels());
+			const auto& streamingLevels = world->GetStreamingLevels();
 
 			// Find newly added levels.
 			for (const auto level : streamingLevels)
