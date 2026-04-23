@@ -487,17 +487,17 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 				{
 					FMemoryWriter Archive(*OutSaveData, true);
 					RawState->SaveToArchive(Archive);
-		Archive.Close();
-		if (Archive.IsError() || Archive.IsCriticalError())
-		{
-			UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
-						CompleteOnGameThread(false);
-						return;
-					}
-		}
+					Archive.Close();
+					if (Archive.IsError() || Archive.IsCriticalError())
+					{
+						UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
+							CompleteOnGameThread(false);
+							return;
+						}
+				}
 
 				if (OutSaveData->Num() == 0 || SlotName.IsEmpty())
-		{
+				{
 					UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
 					CompleteOnGameThread(false);
 					return;
