@@ -149,10 +149,13 @@ public:
 	UPROPERTY(BlueprintReadWrite, Config, Category="SPUD")
 	int32 ScreenshotHeight = 135;
 
-	FDelegateHandle OnScreenshotCapturedHandle;
-	FDelegateHandle OnScreenshotRequestProcessedHandle;
+	/// Maximum number of numbered quick save slots to keep. 0 = single reusable slot (legacy behavior).
+	UPROPERTY(BlueprintReadWrite, Config)
+	int32 MaxQuickSaves = 0;
 
-	FString ScreenshotFileName;
+	/// Maximum number of numbered auto save slots to keep. 0 = single reusable slot (legacy behavior).
+	UPROPERTY(BlueprintReadWrite, Config)
+	int32 MaxAutoSaves = 0;
 
 	/// If true, use the show/hide events of streaming levels to save/load, which is compatible with World Partition
 	/// You can set this to false to change to the legacy mode which requires ASpudStreamingVolume
@@ -177,11 +180,13 @@ protected:
 	FCriticalSection LevelsPendingLoadMutex;
 	FCriticalSection LevelsPendingUnloadMutex;
 	FTimerHandle StreamLevelUnloadTimerHandle;
-	TMap<int32, float> ScreenshotTimeouts;
 	FString SlotNameInProgress;
 	FText TitleInProgress;
 	UPROPERTY()
 	TObjectPtr<const USpudCustomSaveInfo> ExtraInfoInProgress;
+
+	bool bPendingEndGame = false;
+	TOptional<TPair<bool, bool>> PendingNewGameArgs;
 
 	UPROPERTY()
 	TArray<TWeakObjectPtr<UObject>> GlobalObjects;
@@ -263,13 +268,12 @@ protected:
 	void StoreWorld(UWorld* World, bool bReleaseLevels, bool bBlocking);
 	void StoreLevel(ULevel* Level, bool bRelease, bool bBlocking);
 
-	UFUNCTION()
-	void ScreenshotTimedOut(const int32 UserIndex);
-	UFUNCTION()
-    void OnScreenshotCaptured(int32 Width, int32 Height, const TArray<FColor>& Colours, const int32 UserIndex);
-	UFUNCTION()
-    void OnScreenshotRequestProcessed(const int32 UserIndex);
-	void ResetScreenshotState(const int32 UserIndex);
+	void OnScreenshotCaptured(int32 Width, int32 Height, TArray<FColor>&& Colours, const int32 UserIndex);
+
+	static bool ParseNumberedSlotName(const FString& SlotName, const TCHAR* BaseSlotName, int32& OutNumber);
+	static FString MakeNumberedSlotName(const TCHAR* BaseSlotName, int32 Number);
+	int32 GetHighestSlotNumber(const TCHAR* BaseSlotName, const int32 UserIndex) const;
+	void CleanupOldNumberedSaves(const TCHAR* BaseSlotName, int32 MaxToKeep, int32 LatestNumber, const int32 UserIndex);
 
 	void FinishSaveGame(const FString& SlotName, const int32 UserIndex, const FText& Title, const USpudCustomSaveInfo* ExtraInfo, TArray<uint8>* ScreenshotData);
 	void LoadComplete(const FString& SlotName, const int32 UserIndex, bool bSuccess);
@@ -323,17 +327,22 @@ public:
 	* @param bTakeScreenshot If true, the save will include a screenshot, the dimensions of which are
 	* set by the ScreenshotWidth/ScreenshotHeight properties.
 	* @param ExtraInfo Optional object containing custom fields you want to be available when listing saves
+	* @param bAsync
 	**/
+
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="SPUD")
-    void AutoSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0);
+    void AutoSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0, bool
+                      bAsync = false);
 	/** Perform a Quick Save of the game in a single re-used slot, in response to a player request
 	 * @param Title Optional title of the save, if blank will be titled "Quick Save"
 	 * @param bTakeScreenshot If true, the save will include a screenshot, the dimensions of which are
 	 * set by the ScreenshotWidth/ScreenshotHeight properties.
 	 * @param ExtraInfo Optional object containing custom fields you want to be available when listing saves
+	 * @param bAsync
 	 **/
 	UFUNCTION(BlueprintCallable, BlueprintAuthorityOnly, Category="SPUD")
-    void QuickSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0);
+    void QuickSaveGame(FText Title = FText(), bool bTakeScreenshot = true, const USpudCustomSaveInfo* ExtraInfo = nullptr, const int32 UserIndex = 0, bool
+                       bAsync = false);
 	
 	/**
 	 * Quick load the game from the last player-requested Quick Save slot (NOT the last autosave or manual save)

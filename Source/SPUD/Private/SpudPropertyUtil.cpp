@@ -12,6 +12,15 @@
 
 DEFINE_LOG_CATEGORY(LogSpudProps)
 
+struct FCachedPersistentProperty
+{
+	FProperty* Property = nullptr;
+	FStructProperty* NestedStructProp = nullptr;
+	bool bIsInstancedStruct = false;
+};
+
+static TMap<TPair<const UStruct*, bool>, TArray<FCachedPersistentProperty>> PersistentPropertyCache;
+
 bool SpudPropertyUtil::ShouldPropertyBeIncluded(FProperty* Property, bool IsChildOfSaveGame)
 {
 	if (Property->HasAnyPropertyFlags(CPF_Deprecated))
@@ -305,73 +314,94 @@ bool SpudPropertyUtil::VisitPersistentProperties(UObject* RootObject, const UStr
                                                      void* ContainerPtr, bool IsChildOfSaveGame, int Depth,
                                                      PropertyVisitor& Visitor)
 {
-	// NOTE: RootObject and ContainerPtr can be null (when parsing just definitions without instances)
-	for (TFieldIterator<FProperty>PIT(Definition, EFieldIteratorFlags::IncludeSuper); PIT; ++PIT)
+	const auto CacheKey = MakeTuple(Definition, IsChildOfSaveGame);
+	auto CachedList = PersistentPropertyCache.Find(CacheKey);
+
+	if (!CachedList)
 	{
-		FProperty* Property = *PIT;
-
-		if (!ShouldPropertyBeIncluded(Property, IsChildOfSaveGame))
-			continue;
-
-		if (!IsPropertySupported(Property))
+		TArray<FCachedPersistentProperty> NewCache;
+		for (TFieldIterator<FProperty> PIT(Definition, EFieldIteratorFlags::IncludeSuper); PIT; ++PIT)
 		{
-			Visitor.UnsupportedProperty(RootObject, Property, PrefixID, Depth);
-			continue;
+			FProperty* Property = *PIT;
+
+			if (!ShouldPropertyBeIncluded(Property, IsChildOfSaveGame))
+				continue;
+
+			if (!IsPropertySupported(Property))
+			{
+				UE_LOG(LogSpudProps, Error, TEXT("Property %s/%s is marked for save but is an unsupported type, ignoring."),
+					*GetNameSafe(RootObject), *Property->GetName());
+				continue;
+			}
+
+			FCachedPersistentProperty Entry;
+			Entry.Property = Property;
+			Entry.NestedStructProp = nullptr;
+			Entry.bIsInstancedStruct = false;
+
+			if (const auto SProp = CastField<FStructProperty>(Property))
+			{
+				if (!IsBuiltInStructProperty(SProp))
+				{
+					Entry.NestedStructProp = SProp;
+					Entry.bIsInstancedStruct = SProp->Struct->IsChildOf(FInstancedStruct::StaticStruct());
+				}
+			}
+
+			NewCache.Add(Entry);
 		}
 
-		// Visitor can early-out
-		if (!Visitor.VisitProperty(RootObject, Property, PrefixID, ContainerPtr, Depth))
+		CachedList = &PersistentPropertyCache.Add(CacheKey, MoveTemp(NewCache));
+	}
+
+	// Copy to local — recursive calls for nested structs can Add() to the map,
+	// which may rehash and invalidate the CachedList pointer.
+	const auto LocalCache = *CachedList;
+
+	for (const auto& Entry : LocalCache)
+	{
+		if (!Visitor.VisitProperty(RootObject, Entry.Property, PrefixID, ContainerPtr, Depth))
 			return false;
 
-		// Now deal with cascading into nested structs (custom structs, not FVector etc)
-		if (const auto SProp = CastField<FStructProperty>(Property))
+		if (Entry.NestedStructProp)
 		{
-			if (!IsBuiltInStructProperty(SProp))
+			const UScriptStruct* StructDefinition = nullptr;
+			void* StructPtr = nullptr;
+
+			if (Entry.bIsInstancedStruct)
 			{
-				const UScriptStruct* StructDefinition = nullptr;
-				void* StructPtr = nullptr;
+				const auto InstancedStruct = ContainerPtr
+					? Entry.NestedStructProp->ContainerPtrToValuePtr<FInstancedStruct>(ContainerPtr)
+					: nullptr;
 
-				// Check if it's a InstancedStruct
-             	if(SProp->Struct->IsChildOf(FInstancedStruct::StaticStruct()))
-             	{
-             		// If it is, we need to get the actual struct from the property
-             		const FInstancedStruct* InstancedStruct = ContainerPtr ? SProp->ContainerPtrToValuePtr<FInstancedStruct>(ContainerPtr) : nullptr;
+				if (InstancedStruct)
+				{
+					if (!InstancedStruct->IsValid())
+					{
+						continue;
+					}
 
-             		if(InstancedStruct)
-             		{
-             			if(!InstancedStruct->IsValid())
-             			{
-             				// If it's not valid, ignore it
-			 				continue;
-             			}
-
-             			StructDefinition = InstancedStruct->GetScriptStruct();
-			 			StructPtr = (void*)InstancedStruct->GetMemory();
-             		}
-             	}
-                else
-                {
-                	StructDefinition = SProp->Struct;
-                	StructPtr = ContainerPtr ? SProp->ContainerPtrToValuePtr<void>(ContainerPtr) : nullptr;
-                }
-
-				// Everything underneath a custom struct is recorded with a nested prefix
-				const uint32 NewPrefixID = Visitor.GetNestedPrefix(SProp, PrefixID);
-				// Should never have no prefix, if none abort
-				if (NewPrefixID == SPUDDATA_PREFIXID_NONE)
-					continue;
-
-				const int NewDepth = Depth + 1;
-		
-				Visitor.StartNestedStruct(RootObject, SProp, NewPrefixID, NewDepth);
-				if (!VisitPersistentProperties(RootObject, StructDefinition, NewPrefixID, StructPtr, true, NewDepth, Visitor))
-					return false;				
-				Visitor.EndNestedStruct(RootObject, SProp, NewPrefixID, NewDepth);
+					StructDefinition = InstancedStruct->GetScriptStruct();
+					StructPtr = const_cast<uint8*>(InstancedStruct->GetMemory());
+				}
 			}
-		}
+			else
+			{
+				StructDefinition = Entry.NestedStructProp->Struct;
+				StructPtr = ContainerPtr ? Entry.NestedStructProp->ContainerPtrToValuePtr<void>(ContainerPtr) : nullptr;
+			}
 
-		// We no longer cascade into UObjects here, since they are separate types
-		// They will be cascaded into by visitors because whether / how you cascade depends on the runtime instance type (or null)
+			const uint32 NewPrefixID = Visitor.GetNestedPrefix(Entry.NestedStructProp, PrefixID);
+			if (NewPrefixID == SPUDDATA_PREFIXID_NONE)
+				continue;
+
+			const int NewDepth = Depth + 1;
+
+			Visitor.StartNestedStruct(RootObject, Entry.NestedStructProp, NewPrefixID, NewDepth);
+			if (!VisitPersistentProperties(RootObject, StructDefinition, NewPrefixID, StructPtr, true, NewDepth, Visitor))
+				return false;
+			Visitor.EndNestedStruct(RootObject, Entry.NestedStructProp, NewPrefixID, NewDepth);
+		}
 	}
 
 	return true;
@@ -1405,5 +1435,3 @@ FString SpudPropertyUtil::GetLogPrefix(const FProperty* Property, int Depth)
 
 	return FString::Printf(TEXT(" |%s %s"), *Prefix, *Property->GetNameCPP());
 }
-
-
