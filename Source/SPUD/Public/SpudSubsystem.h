@@ -149,11 +149,6 @@ public:
 	UPROPERTY(BlueprintReadWrite, Config)
 	int32 ScreenshotHeight = 135;
 
-	FDelegateHandle OnScreenshotCapturedHandle;
-	FDelegateHandle OnScreenshotRequestProcessedHandle;
-
-	FString ScreenshotFileName;
-
 	/// If true, use the show/hide events of streaming levels to save/load, which is compatible with World Partition
 	/// You can set this to false to change to the legacy mode which requires ASpudStreamingVolume
 	UPROPERTY(BlueprintReadWrite, Config)
@@ -177,7 +172,6 @@ protected:
 	FCriticalSection LevelsPendingLoadMutex;
 	FCriticalSection LevelsPendingUnloadMutex;
 	FTimerHandle StreamLevelUnloadTimerHandle;
-	TMap<int32, float> ScreenshotTimeouts;
 	FString SlotNameInProgress;
 	FText TitleInProgress;
 	UPROPERTY()
@@ -266,13 +260,7 @@ protected:
 	void StoreWorld(UWorld* World, bool bReleaseLevels, bool bBlocking);
 	void StoreLevel(ULevel* Level, bool bRelease, bool bBlocking);
 
-	UFUNCTION()
-	void ScreenshotTimedOut(const int32 UserIndex);
-	UFUNCTION()
-    void OnScreenshotCaptured(int32 Width, int32 Height, const TArray<FColor>& Colours, const int32 UserIndex);
-	UFUNCTION()
-    void OnScreenshotRequestProcessed(const int32 UserIndex);
-	void ResetScreenshotState(const int32 UserIndex);
+	void OnScreenshotCaptured(int32 Width, int32 Height, TArray<FColor>&& Colours, const int32 UserIndex);
 
 	void FinishSaveGame(const FString& SlotName, const int32 UserIndex, const FText& Title, const USpudCustomSaveInfo* ExtraInfo, TArray<uint8>* ScreenshotData);
 	void LoadComplete(const FString& SlotName, const int32 UserIndex, bool bSuccess);

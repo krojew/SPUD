@@ -1,8 +1,8 @@
 #include "SpudSubsystem.h"
 #include "SpudState.h"
 #include "Engine/LevelStreaming.h"
-#include "Engine/LocalPlayer.h"
 #include "Kismet/GameplayStatics.h"
+#include "GameFramework/GameUserSettings.h"
 #include "ImageUtils.h"
 #include "TimerManager.h"
 #include "HAL/FileManager.h"
@@ -337,32 +337,44 @@ void USpudSubsystem::SaveGame(const FString& SlotName, const FText& Title, bool 
 		TitleInProgress = Title;
 		ExtraInfoInProgress = ExtraInfo;
 
-		static const auto CVarHDR = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.HDR.EnableHDROutput"));
-		const bool bHDROutput = CVarHDR && CVarHDR->GetValueOnGameThread() != 0;
-
-		if (!bHDROutput)
+		if (const auto Viewport = GEngine->GameViewport ? GEngine->GameViewport->GetGameViewport() : nullptr)
 		{
-			if (const auto Viewport = GEngine->GameViewport ? GEngine->GameViewport->GetGameViewport() : nullptr)
+			if (const auto Size = Viewport->GetSizeXY(); Size.X > 0 && Size.Y > 0)
 			{
-				TArray<FColor> Pixels;
-				if (const auto Size = Viewport->GetSizeXY(); Size.X > 0 && Size.Y > 0 && Viewport->ReadPixels(Pixels))
+				if (GEngine->GetGameUserSettings()->IsHDREnabled())
 				{
-					OnScreenshotCaptured(Size.X, Size.Y, Pixels, UserIndex);
+					if (TArray<FLinearColor> HDRPixels; Viewport->ReadLinearColorPixels(HDRPixels))
+					{
+						TWeakObjectPtr WeakThis(this);
+						AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
+							[WeakThis, HDRPixels = MoveTemp(HDRPixels), W = Size.X, H = Size.Y, UserIndex]() mutable
+							{
+								TArray<FColor> Pixels;
+								Pixels.SetNumUninitialized(HDRPixels.Num());
+								for (auto i = 0; i < HDRPixels.Num(); ++i)
+								{
+									Pixels[i] = HDRPixels[i].ToFColor(true);
+								}
+								HDRPixels.Empty();
+
+								AsyncTask(ENamedThreads::GameThread, [WeakThis, Pixels = MoveTemp(Pixels), W, H, UserIndex]() mutable
+								{
+									if (const auto S = WeakThis.Get())
+									{
+										S->OnScreenshotCaptured(W, H, MoveTemp(Pixels), UserIndex);
+									}
+								});
+							}
+						);
+							
+						return;
+					}
+				}
+				else if (TArray<FColor> Pixels; Viewport->ReadPixels(Pixels))
+				{
+					OnScreenshotCaptured(Size.X, Size.Y, MoveTemp(Pixels), UserIndex);
 					return;
 				}
-			}
-		}
-		else if (const auto PC = UGameplayStatics::GetPlayerController(GetWorld(), UserIndex))
-		{
-			if (const auto LP = PC->GetLocalPlayer(); LP && LP->ViewportClient)
-			{
-				OnScreenshotCapturedHandle = LP->ViewportClient->OnScreenshotCaptured().AddUObject(this, &USpudSubsystem::OnScreenshotCaptured, UserIndex);
-				OnScreenshotRequestProcessedHandle = FScreenshotRequest::OnScreenshotRequestProcessed().AddUObject(this, &USpudSubsystem::OnScreenshotRequestProcessed, UserIndex);
-				FScreenshotRequest::RequestScreenshot(false);
-				ScreenshotFileName = FScreenshotRequest::GetFilename();
-				float& ScreenShotTimeout = ScreenshotTimeouts.FindOrAdd(UserIndex);
-				ScreenShotTimeout = 1.0f;
-				return;
 			}
 		}
 
@@ -375,25 +387,14 @@ void USpudSubsystem::SaveGame(const FString& SlotName, const FText& Title, bool 
 	}
 }
 
-void USpudSubsystem::ScreenshotTimedOut(const int32 UserIndex)
+void USpudSubsystem::OnScreenshotCaptured(int32 Width, int32 Height, TArray<FColor>&& Colours, const int32 UserIndex)
 {
-	UE_LOG(LogSpudSubsystem, Error, TEXT("Request for save screenshot timed out. This is most likely a UE bug: "
-		"Widget Blueprints being open in the editor during PIE seems to break screenshots. Completing save game without a screenshot."))
-
-	ResetScreenshotState(UserIndex);
-	FinishSaveGame(SlotNameInProgress, UserIndex, TitleInProgress, ExtraInfoInProgress, nullptr);
-}
-
-void USpudSubsystem::OnScreenshotCaptured(int32 Width, int32 Height, const TArray<FColor>& Colours, const int32 UserIndex)
-{
-	ResetScreenshotState(UserIndex);
-
 	const int32 TargetWidth = ScreenshotWidth;
 	const int32 TargetHeight = ScreenshotHeight;
 	TWeakObjectPtr WeakThis(this);
 
-	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-		[WeakThis, RawPixels = Colours, Width, Height, TargetWidth, TargetHeight, UserIndex]() mutable
+	AsyncTask(ENamedThreads::AnyBackgroundHiPriTask,
+		[WeakThis, RawPixels = MoveTemp(Colours), Width, Height, TargetWidth, TargetHeight, UserIndex]() mutable
 		{
 			TArray<FColor> CroppedResized;
 			FImageUtils::CropAndScaleImage(Width, Height, TargetWidth, TargetHeight, RawPixels, CroppedResized);
@@ -408,59 +409,9 @@ void USpudSubsystem::OnScreenshotCaptured(int32 Width, int32 Height, const TArra
 
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, PngData, UserIndex]()
 			{
-				if (auto* S = WeakThis.Get())
+				if (const auto S = WeakThis.Get())
 				{
 					S->FinishSaveGame(S->SlotNameInProgress, UserIndex, S->TitleInProgress, S->ExtraInfoInProgress, &*PngData);
-				}
-			});
-		});
-}
-
-void USpudSubsystem::ResetScreenshotState(const int32 UserIndex)
-{
-	float& ScreenShotTimeout = ScreenshotTimeouts.FindOrAdd(UserIndex);
-	ScreenShotTimeout = 0.0f;
-
-	if (const auto PC = UGameplayStatics::GetPlayerController(GetWorld(), UserIndex))
-	{
-		if (const auto LP = PC->GetLocalPlayer())
-		{
-			if (const auto VC = LP->ViewportClient)
-			{
-				VC->OnScreenshotCaptured().Remove(OnScreenshotCapturedHandle);
-			}
-		}
-	}
-
-	FScreenshotRequest::OnScreenshotRequestProcessed().Remove(OnScreenshotRequestProcessedHandle);
-	OnScreenshotCapturedHandle.Reset();
-	OnScreenshotRequestProcessedHandle.Reset();
-}
-
-void USpudSubsystem::OnScreenshotRequestProcessed(const int32 UserIndex)
-{
-	ResetScreenshotState(UserIndex);
-
-	const FString FileName = ScreenshotFileName;
-	TWeakObjectPtr WeakThis(this);
-
-	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-		[WeakThis, FileName, UserIndex]()
-		{
-			FImage Image;
-			FImageUtils::LoadImage(*FileName, Image);
-			IFileManager::Get().Delete(*FileName);
-			Image.ChangeFormat(ERawImageFormat::BGRA8, Image.GammaSpace);
-
-			const auto W = Image.GetWidth();
-			const auto H = Image.GetHeight();
-			TArray<FColor> Pixels(Image.AsBGRA8());
-
-			AsyncTask(ENamedThreads::GameThread, [WeakThis, Pixels = MoveTemp(Pixels), W, H, UserIndex]()
-			{
-				if (auto* S = WeakThis.Get())
-				{
-					S->OnScreenshotCaptured(W, H, Pixels, UserIndex);
 				}
 			});
 		});
@@ -513,12 +464,10 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 		TWeakObjectPtr WeakState(State);
 		TWeakObjectPtr WeakThis(this);
 		AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
-			[WeakThis, WeakState, SaveSystem, SlotName, UserIndex]()
-			{
+			[WeakThis, WeakState, SaveSystem, SlotName, UserIndex]{
 				auto CompleteOnGameThread = [WeakThis, SlotName, UserIndex](bool bSuccess)
 				{
-					AsyncTask(ENamedThreads::GameThread, [WeakThis, SlotName, UserIndex, bSuccess]()
-	{
+					AsyncTask(ENamedThreads::GameThread, [WeakThis, SlotName, UserIndex, bSuccess]{
 						if (USpudSubsystem* S = WeakThis.Get())
 							S->SaveComplete(SlotName, UserIndex, bSuccess);
 					});
@@ -577,34 +526,34 @@ void USpudSubsystem::FinishSaveGame(const FString& SlotName, const int32 UserInd
 						});
 				});
 			});
+		}
+		else
+		{
+			TSharedRef<TArray<uint8>> OutSaveData(new TArray<uint8>());
+			auto Archive = FMemoryWriter(*OutSaveData, true);
+			State->SaveToArchive(Archive);
+			Archive.Close();
+
+			if (Archive.IsError() || Archive.IsCriticalError())
+			{
+				UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
+				SaveComplete(SlotName, UserIndex, false);
+			}
+			else if (OutSaveData->Num() > 0 && SlotName.Len() > 0)
+			{
+				bool SaveOK;
+				if (!SaveSystem->SaveGame(false, *SlotName, UserIndex, *OutSaveData))
+				{
+					UE_LOG(LogSpudSubsystem, Error, TEXT("Error while saving game to %s"), *SlotName);
+					SaveOK = false;
 				}
 				else
 				{
-		TSharedRef<TArray<uint8>> OutSaveData(new TArray<uint8>());
-		auto Archive = FMemoryWriter(*OutSaveData, true);
-		State->SaveToArchive(Archive);
-		Archive.Close();
-
-		if (Archive.IsError() || Archive.IsCriticalError())
-		{
-			UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
-			SaveComplete(SlotName, UserIndex, false);
-		}
-		else if (OutSaveData->Num() > 0 && SlotName.Len() > 0)
-		{
-					bool SaveOK;
-					if (!SaveSystem->SaveGame(false, *SlotName, UserIndex, *OutSaveData))
-					{
-						UE_LOG(LogSpudSubsystem, Error, TEXT("Error while saving game to %s"), *SlotName);
-						SaveOK = false;
-					}
-					else
-					{
-						UE_LOG(LogSpudSubsystem, Log, TEXT("Save to slot %s: Success"), *SlotName);
-						SaveOK = true;
-					}
-					SaveComplete(SlotName, UserIndex, SaveOK);
+					UE_LOG(LogSpudSubsystem, Log, TEXT("Save to slot %s: Success"), *SlotName);
+					SaveOK = true;
 				}
+				SaveComplete(SlotName, UserIndex, SaveOK);
+			}
 			else
 			{
 				UE_LOG(LogSpudSubsystem, Error, TEXT("Error while creating save game for slot %s"), *SlotName);
@@ -1642,24 +1591,6 @@ USpudCustomSaveInfo* USpudSubsystem::CreateCustomSaveInfo()
 
 void USpudSubsystem::Tick(float DeltaTime)
 {
-	TArray<int32> TimedOut;
-	for (TPair<int32, float>& ScreenShotTimeout : ScreenshotTimeouts)
-	{
-		if (ScreenShotTimeout.Value > 0)
-		{
-			ScreenShotTimeout.Value -= DeltaTime;
-			if (ScreenShotTimeout.Value <= 0)
-			{
-				ScreenShotTimeout.Value = 0;
-				TimedOut.Add(ScreenShotTimeout.Key);
-			}
-		}
-	}
-	for (const int32 Idx : TimedOut)
-	{
-		ScreenshotTimedOut(Idx);
-	}
-
 	if (bSupportWorldPartition)
 	{
 		auto world = GetWorld();
