@@ -17,8 +17,8 @@
 DEFINE_LOG_CATEGORY(LogSpudSubsystem)
 
 
-#define SPUD_QUICKSAVE_SLOTNAME "__QuickSave__"
-#define SPUD_AUTOSAVE_SLOTNAME "__AutoSave__"
+#define SPUD_QUICKSAVE_SLOTNAME TEXT("__QuickSave__")
+#define SPUD_AUTOSAVE_SLOTNAME TEXT("__AutoSave__")
 
 
 void USpudSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -147,38 +147,148 @@ void USpudSubsystem::EndGame()
 
 void USpudSubsystem::AutoSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex, bool bAsync)
 {
-	SaveGame(SPUD_AUTOSAVE_SLOTNAME,
-		Title.IsEmpty() ? NSLOCTEXT("Spud", "AutoSaveTitle", "Autosave") : Title,
-		bTakeScreenshot,
-		ExtraInfo,
-		UserIndex,
-		bAsync);
+	FString SlotName;
+	FText DefaultTitle;
+
+	if (MaxAutoSaves > 0)
+	{
+		const auto NextNumber = FMath::Max(1, GetHighestSlotNumber(SPUD_AUTOSAVE_SLOTNAME, UserIndex) + 1);
+		SlotName = MakeNumberedSlotName(SPUD_AUTOSAVE_SLOTNAME, NextNumber);
+		DefaultTitle = FText::Format(NSLOCTEXT("Spud", "AutoSaveTitleNumbered", "Autosave {0}"), NextNumber);
+		CleanupOldNumberedSaves(SPUD_AUTOSAVE_SLOTNAME, MaxAutoSaves, NextNumber, UserIndex);
+	}
+	else
+	{
+		SlotName = SPUD_AUTOSAVE_SLOTNAME;
+		DefaultTitle = NSLOCTEXT("Spud", "AutoSaveTitle", "Autosave");
+	}
+
+	SaveGame(SlotName, Title.IsEmpty() ? DefaultTitle : Title, bTakeScreenshot, ExtraInfo, UserIndex, bAsync);
 }
 
 void USpudSubsystem::QuickSaveGame(FText Title, bool bTakeScreenshot, const USpudCustomSaveInfo* ExtraInfo, const int32 UserIndex, bool bAsync)
 {
-	SaveGame(SPUD_QUICKSAVE_SLOTNAME,
-		Title.IsEmpty() ? NSLOCTEXT("Spud", "QuickSaveTitle", "Quick Save") : Title,
-		bTakeScreenshot,
-		ExtraInfo,
-		UserIndex,
-		bAsync);
+	FString SlotName;
+	FText DefaultTitle;
+
+	if (MaxQuickSaves > 0)
+	{
+		const auto NextNumber = FMath::Max(1, GetHighestSlotNumber(SPUD_QUICKSAVE_SLOTNAME,UserIndex) + 1);
+		SlotName = MakeNumberedSlotName(SPUD_QUICKSAVE_SLOTNAME,NextNumber);
+		DefaultTitle = FText::Format(NSLOCTEXT("Spud", "QuickSaveTitleNumbered", "Quick Save {0}"), NextNumber);
+		CleanupOldNumberedSaves(SPUD_QUICKSAVE_SLOTNAME, MaxQuickSaves,NextNumber, UserIndex);
+	}
+	else
+	{
+		SlotName = SPUD_QUICKSAVE_SLOTNAME;
+		DefaultTitle = NSLOCTEXT("Spud", "QuickSaveTitle", "Quick Save");
+	}
+
+	SaveGame(SlotName, Title.IsEmpty() ? DefaultTitle : Title, bTakeScreenshot, ExtraInfo, UserIndex, bAsync);
 }
 
 void USpudSubsystem::QuickLoadGame(const FString& TravelOptions, const int32 UserIndex)
 {
-	LoadGame(SPUD_QUICKSAVE_SLOTNAME, TravelOptions, UserIndex);
+	FString SlotName;
+	if (MaxQuickSaves > 0)
+	{
+		const auto LatestNumber = GetHighestSlotNumber(SPUD_QUICKSAVE_SLOTNAME,UserIndex);
+		if (LatestNumber > 0)
+		{
+			SlotName = MakeNumberedSlotName(SPUD_QUICKSAVE_SLOTNAME,LatestNumber);
+		}
+		else if (LatestNumber == 0)
+		{
+			SlotName = SPUD_QUICKSAVE_SLOTNAME;
+		}
+		else
+		{
+			return;
+		}
+	}
+	else
+	{
+		SlotName = SPUD_QUICKSAVE_SLOTNAME;
+	}
+
+	LoadGame(SlotName, TravelOptions, UserIndex);
 }
 
 
 bool USpudSubsystem::IsQuickSave(const FString& SlotName)
 {
-	return SlotName == SPUD_QUICKSAVE_SLOTNAME;
+	int32 Unused;
+	return ParseNumberedSlotName(SlotName, SPUD_QUICKSAVE_SLOTNAME, Unused);
 }
 
 bool USpudSubsystem::IsAutoSave(const FString& SlotName)
 {
-	return SlotName == SPUD_AUTOSAVE_SLOTNAME;
+	int32 Unused;
+	return ParseNumberedSlotName(SlotName, SPUD_AUTOSAVE_SLOTNAME, Unused);
+}
+
+bool USpudSubsystem::ParseNumberedSlotName(const FString& SlotName, const TCHAR* BaseSlotName, int32& OutNumber)
+{
+	if (SlotName == BaseSlotName)
+	{
+		OutNumber = 0;
+		return true;
+	}
+
+	const FString Base(BaseSlotName);
+	const auto Prefix = Base.LeftChop(2) + TEXT("_");
+	if (SlotName.StartsWith(Prefix) && SlotName.EndsWith(TEXT("__")) && SlotName.Len() > Prefix.Len() + 2)
+	{
+		const auto NumberStr = SlotName.Mid(Prefix.Len(), SlotName.Len() - Prefix.Len() - 2);
+		if (NumberStr.IsNumeric())
+		{
+			OutNumber = FCString::Atoi(*NumberStr);
+			return OutNumber > 0;
+		}
+	}
+
+	return false;
+}
+
+FString USpudSubsystem::MakeNumberedSlotName(const TCHAR* BaseSlotName, int32 Number)
+{
+	const FString Base(BaseSlotName);
+	return Base.LeftChop(2) + FString::Printf(TEXT("_%d__"), Number);
+}
+
+int32 USpudSubsystem::GetHighestSlotNumber(const TCHAR* BaseSlotName, const int32 UserIndex) const
+{
+	TArray<FString> SaveFiles;
+	ListSaveGameFiles(SaveFiles, UserIndex);
+
+	auto HighestNumber = -1;
+	for (const auto& File : SaveFiles)
+	{
+		const auto SlotName = FPaths::GetBaseFilename(File);
+		int32 Number;
+		if (ParseNumberedSlotName(SlotName, BaseSlotName, Number) && Number > HighestNumber)
+		{
+			HighestNumber = Number;
+		}
+	}
+	return HighestNumber;
+}
+
+void USpudSubsystem::CleanupOldNumberedSaves(const TCHAR* BaseSlotName, int32 MaxToKeep, int32 LatestNumber, const int32 UserIndex)
+{
+	TArray<FString> SaveFiles;
+	ListSaveGameFiles(SaveFiles, UserIndex);
+
+	const auto OldestToKeep = LatestNumber - MaxToKeep + 1;
+	for (const auto& File : SaveFiles)
+	{
+		const auto SlotName = FPaths::GetBaseFilename(File);
+		int32 Number;
+		if (ParseNumberedSlotName(SlotName, BaseSlotName, Number) && Number < OldestToKeep)
+		{
+			DeleteSave(SlotName, UserIndex);
+		}
+	}
 }
 
 void USpudSubsystem::NotifyLevelLoadedExternally(FName LevelName)
@@ -1356,11 +1466,42 @@ USpudSaveGameInfo* USpudSubsystem::GetLatestSaveGame(const int32 UserIndex)
 
 USpudSaveGameInfo* USpudSubsystem::GetQuickSaveGame(const int32 UserIndex)
 {
+	if (MaxQuickSaves > 0)
+	{
+		const auto LatestNumber = GetHighestSlotNumber(SPUD_QUICKSAVE_SLOTNAME,UserIndex);
+		if (LatestNumber > 0)
+		{
+			return GetSaveGameInfo(MakeNumberedSlotName(SPUD_QUICKSAVE_SLOTNAME,LatestNumber), UserIndex);
+		}
+		
+		if (LatestNumber == 0)
+		{
+			return GetSaveGameInfo(SPUD_QUICKSAVE_SLOTNAME, UserIndex);
+		}
+		
+		return nullptr;
+	}
+	
 	return GetSaveGameInfo(SPUD_QUICKSAVE_SLOTNAME, UserIndex);
 }
 
 USpudSaveGameInfo* USpudSubsystem::GetAutoSaveGame(const int32 UserIndex)
 {
+	if (MaxAutoSaves > 0)
+	{
+		const auto LatestNumber = GetHighestSlotNumber(SPUD_AUTOSAVE_SLOTNAME, UserIndex);
+		if (LatestNumber > 0)
+		{
+			return GetSaveGameInfo(MakeNumberedSlotName(SPUD_AUTOSAVE_SLOTNAME, LatestNumber), UserIndex);
+		}
+		if (LatestNumber == 0)
+		{
+			return GetSaveGameInfo(SPUD_AUTOSAVE_SLOTNAME, UserIndex);
+		}
+		
+		return nullptr;
+	}
+	
 	return GetSaveGameInfo(SPUD_AUTOSAVE_SLOTNAME, UserIndex);
 }
 

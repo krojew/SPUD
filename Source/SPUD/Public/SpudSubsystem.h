@@ -149,6 +149,14 @@ public:
 	UPROPERTY(BlueprintReadWrite, Config)
 	int32 ScreenshotHeight = 135;
 
+	/// Maximum number of numbered quick save slots to keep. 0 = single reusable slot (legacy behavior).
+	UPROPERTY(BlueprintReadWrite, Config)
+	int32 MaxQuickSaves = 0;
+
+	/// Maximum number of numbered auto save slots to keep. 0 = single reusable slot (legacy behavior).
+	UPROPERTY(BlueprintReadWrite, Config)
+	int32 MaxAutoSaves = 0;
+
 	/// If true, use the show/hide events of streaming levels to save/load, which is compatible with World Partition
 	/// You can set this to false to change to the legacy mode which requires ASpudStreamingVolume
 	UPROPERTY(BlueprintReadWrite, Config)
@@ -261,6 +269,11 @@ protected:
 	void StoreLevel(ULevel* Level, bool bRelease, bool bBlocking);
 
 	void OnScreenshotCaptured(int32 Width, int32 Height, TArray<FColor>&& Colours, const int32 UserIndex);
+
+	static bool ParseNumberedSlotName(const FString& SlotName, const TCHAR* BaseSlotName, int32& OutNumber);
+	static FString MakeNumberedSlotName(const TCHAR* BaseSlotName, int32 Number);
+	int32 GetHighestSlotNumber(const TCHAR* BaseSlotName, const int32 UserIndex) const;
+	void CleanupOldNumberedSaves(const TCHAR* BaseSlotName, int32 MaxToKeep, int32 LatestNumber, const int32 UserIndex);
 
 	void FinishSaveGame(const FString& SlotName, const int32 UserIndex, const FText& Title, const USpudCustomSaveInfo* ExtraInfo, TArray<uint8>* ScreenshotData);
 	void LoadComplete(const FString& SlotName, const int32 UserIndex, bool bSuccess);
